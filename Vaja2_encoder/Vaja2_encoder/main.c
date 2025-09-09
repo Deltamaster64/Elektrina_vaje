@@ -8,18 +8,27 @@
 #include "sam.h"
 #include "math.h"
 
+
 // UART0
 #define UART0_RX 9  // UART0 RX line PA9
 #define UART0_TX 10 // UART0 TX line PA10
 #define BAUDRATE 115200
 
+// SPI
+#define SPI_MISO 12 // SPI master in/slave out	-> PA12 -> EXT1 PIN 17
+#define SPI_MOSI 13 // SPI master out/slave in	-> PA13 -> EXT1 PIN 16
+#define SPI_SCK 14  // SPI clock				-> PA14 -> EXT1 PIN 18
+#define SPI_SS_A 14 // SPI Slave select A		-> PB14 -> EXT1 PIN 15
+
+// Improvised delay
 void delay(uint32_t ms) {
 	for (uint32_t k = 0; k < ms; k++) {
 		for (volatile uint32_t i = 0; i < 10000; i++) {;}
 	}
 }
 
-void DefineUART0(void){
+// Functions for UART
+void Define_UART0(void){
 	
 	// Enabling clock for UART0
 	PMC->PMC_PCER0 |= (1 << ID_UART0) | (1 << ID_PIOA);
@@ -27,7 +36,7 @@ void DefineUART0(void){
 	// Disable PIO control over PA9 & 10
 	PIOA->PIO_PDR |= (1 << UART0_RX) | (1 << UART0_TX);
 	
-	// Configuring PIO controller to enable I/O line operations of UART0
+	// Configuring PIO controller to enable I/O line operations for UART0
 	PIOA->PIO_ABCDSR[0] &= ~((1 << UART0_RX) | (1 << UART0_TX));
 	PIOA->PIO_ABCDSR[1] &= ~((1 << UART0_RX) | (1 << UART0_TX));
 	
@@ -59,10 +68,10 @@ void UART_send_string(const char *str){
 		}
 }
 
-void UART_send_number(int value){
+void UART_send_number(uint16_t value){
 	int len = 0;
-	int temp = value;
-	int arr[10];
+	uint16_t temp = value;
+	uint16_t arr[30];
 	
 	//Get length of value
 		
@@ -81,40 +90,84 @@ void UART_send_number(int value){
 	}			
 }
 
-void spi_init(void) {
-	// Enable clock for SPI peripheral
-	PMC->PMC_PCER0 |= (1 << ID_SPI);
+// Functions for SPI
+void Define_SPI(void) {
+	// Enable clock for SPI
+	PMC->PMC_PCER0 |= (1 << ID_SPI);//| (1 << ID_PIOB);
 
-	// Configure pins for SPI (Peripheral A)
-	PIOA->PIO_PDR |= (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14); // Disable PIO control
-	PIOA->PIO_ABSR &= ~((1 << 11) | (1 << 12) | (1 << 13) | (1 << 14)); // Select Peripheral A
+	// Disabling PIO control over SPI pins
+	PIOA->PIO_PDR |= (1 << SPI_MISO) | (1 << SPI_MOSI) | (1 << SPI_SCK);
+	PIOB->PIO_PDR |= (1 << SPI_SS_A);
+		
+	// Configuring PIO controller to enable I/O line operations for SPI on PIOA
+	PIOA->PIO_ABCDSR[0] &= ~((1 << SPI_MISO) | (1 << SPI_MOSI) | (1 << SPI_SCK));
+	PIOA->PIO_ABCDSR[1] &= ~((1 << SPI_MISO) | (1 << SPI_MOSI) | (1 << SPI_SCK));
+	
+	// Configuring PIO controller to enable I/O line operations for SPI on PIOB
+	//PIOB->PIO_ABCDSR[0] |= (1 << SPI_SS_A);
+	//PIOB->PIO_ABCDSR[1] &= ~(1 << SPI_SS_A);
+	
+	// Set CS as output, start high
+	PIOB->PIO_OER = (1 << SPI_SS_A);
+	PIOB->PIO_SODR = (1 << SPI_SS_A);
 
-	// Reset and configure SPI in Master Mode
-	SPI->SPI_CR = SPI_CR_SWRST;      // Reset SPI
-	SPI->SPI_CR = SPI_CR_SPIEN;      // Enable SPI
+	// Reset SPI
+	SPI->SPI_CR = SPI_CR_SWRST;
+		
+	// Configuring SPI in master mode, ???disable fault detection -> only master???, activate CS0 for SPI
+	SPI->SPI_MR = SPI_MR_MSTR | SPI_MR_MODFDIS;// | SPI_MR_PCS(0xE);
 
-	SPI->SPI_MR = SPI_MR_MSTR         // Master mode
-	| SPI_MR_MODFDIS;     // Disable mode fault detection
+	// Configuring Chip Select 0 (16-bit, baud rate = peripheral clock / 42 -> 2MHz, data capture on RE)
+	SPI->SPI_CSR[0] = SPI_CSR_BITS_16_BIT | SPI_CSR_SCBR(42) | SPI_CSR_NCPHA;
+	
+	// Enable SPI
+	SPI->SPI_CR = SPI_CR_SPIEN;
+}
 
-	// Configure Chip Select 0 (8-bit, CPOL=0, NCPHA=1)
-	SPI->SPI_CSR[SPI_NPCS0] = SPI_CSR_BITS_8_BIT    // 8-bit data
-	| SPI_CSR_SCBR(42)      // Baud rate divider (Peripheral clock / 42)
-	| SPI_CSR_NCPHA;        // Data captured on rising edge
+uint16_t SPI_transfer(uint16_t data)
+{
+	// Wait for TX buffer to be empty
+	while (!(SPI->SPI_SR & SPI_SR_TDRE));
 
-	// SPI is ready to use
+	// Write data to SPI TDR (PCS=0 for CS0)
+	SPI->SPI_TDR = SPI_TDR_TD(data) | SPI_TDR_PCS(0);
+
+	// Wait for received data
+	while (!(SPI->SPI_SR & SPI_SR_RDRF));
+
+	// Read received data
+	return (uint16_t)(SPI->SPI_RDR & SPI_RDR_RD_Msk);
+}
+
+uint16_t read_angle(void)
+{
+	// Start AS5050 cycle
+	PIOB->PIO_CODR = (1 << SPI_SS_A);
+	
+	SPI_transfer(0x0000);	// Dummy
+	uint16_t raw = SPI_transfer(0x0000);
+
+	// End AS5050 cycle
+	PIOB->PIO_SODR = (1 << SPI_SS_A);
+
+	return raw & 0x0FFF;
 }
 
 int main(void)
 {
     
     SystemInit();
-	DefineUART0();
+	Define_UART0();
+	Define_SPI();
+	
 			
 	while (1) 
     {	
+		uint16_t angle = read_angle();
+		
 		UART_send_string("Encoder position: ");
-		UART_send_number(255);
+		UART_send_number(angle);
 		UART_send_string("\r\n");
-		delay(100);
+		delay(100);		
 	}
 }
